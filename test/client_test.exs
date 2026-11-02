@@ -126,4 +126,25 @@ defmodule Lucida.ClientTest do
     {:ok, no_secret} = Client.start_link(api_key: "lc_pk_x", http: FakeHttp, flush_interval_ms: 3_600_000)
     assert_raise ArgumentError, fn -> Client.get_remote_config_payload(no_secret, "a/b") end
   end
+
+  test "fallbacks serve the value with reason fallback and no exposure" do
+    flag = %{"key" => "on", "type" => "boolean", "active" => true, "salt" => "s", "aggregation" => %{"kind" => "person"}, "conditions" => [%{"rollout_pct" => 100}]}
+    lc = client(fallbacks: %{"ghost" => "safe"})
+    Client.set_definitions(lc, [flag])
+    d = Client.get_feature_flag_details(lc, "ghost", "u")
+    assert d.value == "safe" and d.reason == "fallback"
+    assert Client.get_feature_flag(lc, "ghost", "u", default: "d") == "safe"
+    on = Client.get_feature_flag_details(lc, "on", "u", send_exposure: false)
+    assert on.value == true and on.reason == "condition_match" and on.condition_index == 0
+    assert Client.get_feature_flag_details(lc, "nope", "u") == nil
+    assert Client.get_feature_flag(lc, "nope", "u", default: "d") == "d"
+    Client.flush(lc)
+    assert FakeHttp.events() == []
+  end
+
+  test "network failure serves the fallback" do
+    FakeHttp.respond([FakeHttp.status(503)])
+    lc = client(only_evaluate_locally: false, fallbacks: %{"x" => "down"})
+    assert Client.get_feature_flag_details(lc, "x", "u").reason == "fallback"
+  end
 end

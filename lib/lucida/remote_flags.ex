@@ -1,14 +1,23 @@
 defmodule Lucida.RemoteFlags do
   @moduledoc "Server calls for flags: the `POST /v1/flags` fallback for flags undecidable locally, and remote-config payloads."
 
-  @doc "Value (`true`, `false` or a variant key) of `key`, or `nil` on any failure."
+  @doc "Details map (see `Lucida.Client.get_feature_flag_details/4`) of `key`, or `nil` on any failure or unknown flag."
   def fetch(cfg, key, distinct_id, opts) do
     body = JSON.encode!(request_body(cfg, key, distinct_id, opts))
 
     with {:ok, %{status: st, body: resp}} when st in 200..299 <-
            cfg.http.request(:post, cfg.host <> "/v1/flags", [{"content-type", "application/json"}], body),
-         {:ok, %{"flags" => %{^key => flag}}} <- JSON.decode(resp) do
-      value(flag)
+         {:ok, %{"flags" => %{^key => flag}} = j} <- JSON.decode(resp) do
+      %{
+        key: key,
+        value: value(flag),
+        payload: flag["payload"],
+        variant: if(is_binary(flag["variant"]) and flag["variant"] != "", do: flag["variant"]),
+        reason: flag["reason"] || "remote",
+        condition_index: flag["condition_index"] || -1,
+        request_id: j["request_id"],
+        locally_evaluated: false
+      }
     else
       _ -> nil
     end

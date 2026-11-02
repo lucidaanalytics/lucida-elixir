@@ -21,6 +21,9 @@ Lucida.Client.shutdown(MyApp.Lucida)
 - With `:secret_key`, flag definitions load from `/v1/flags/definitions` (ETag aware, re-polled every `:flag_poll_ms`)
   and evaluate locally. `get_feature_flag/4` returns `false`, `true`, a variant key, or `nil` when unknown or the flag
   needs server data (cohorts); it records `$feature_flag_called` and `$exposure` once per user, flag and value.
+- `fallbacks: %{"new-checkout" => false}` serves that value (reason `"fallback"`, no exposure) when a flag read fails or the
+  flag is unknown; `get_feature_flag_details/4` returns `%{value, payload, variant, reason, condition_index, request_id,
+  locally_evaluated}`. The per-call `:default` applies only when the key has no fallback.
 - The HTTP port is `Lucida.Http`; pass `http: MyAdapter` to replace the default `Lucida.Http.Httpc`.
 
 `mix test` runs the unit tests and the shared `testdata/flags` vectors (basic, g10, sticky, generated 10,000) plus

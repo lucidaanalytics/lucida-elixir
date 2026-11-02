@@ -10,7 +10,8 @@ defmodule Lucida.Client do
   evaluation), `:flush_at` (20), `:flush_interval_ms` (5000), `:max_queue_size` (1000),
   `:flag_poll_ms` (60000, definitions poll interval), `:only_evaluate_locally` (default true: flags
   undecidable locally read as `nil`; set false to ask `POST /v1/flags` for them), `:app_contexts`
-  (flags scoped to other app contexts are dropped), `:disabled`, `:http` (module implementing `Lucida.Http`), `:name`.
+  (flags scoped to other app contexts are dropped), `:fallbacks` (`%{flag_key => value}` served with reason
+  `"fallback"` and no exposure when a flag read fails or the flag is unknown), `:disabled`, `:http` (module implementing `Lucida.Http`), `:name`.
   """
   use GenServer
 
@@ -100,35 +101,46 @@ defmodule Lucida.Client do
   `:only_evaluate_locally` (overrides the client option), `:default` (returned when undecided).
   """
   def get_feature_flag(server, key, distinct_id, opts \\ []) do
-    cfg = GenServer.call(server, :config)
-
-    case local_flag(server, key, distinct_id, opts) do
-      :undecided ->
-        only_local = Keyword.get(opts, :only_evaluate_locally, cfg.only_local)
-        remote = if only_local or cfg.disabled, do: nil, else: RemoteFlags.fetch(cfg, key, distinct_id, opts)
-        if is_nil(remote), do: opts[:default], else: remote
-
-      value ->
-        value
+    case get_feature_flag_details(server, key, distinct_id, opts) do
+      nil -> opts[:default]
+      d -> d.value
     end
   end
+
+  @doc """
+  Like `get_feature_flag/4` but returns the full result: `%{key, value, payload, variant, reason, condition_index,
+  request_id, locally_evaluated}` (raw Lucida reason), or `nil` when unknown / undecidable and the `:fallbacks`
+  client option has no value for the key. A fallback has reason `"fallback"` and records no exposure.
+  """
+  def get_feature_flag_details(server, key, distinct_id, opts \\ []) do
+    cfg = GenServer.call(server, :config)
+
+    details =
+      case local_results(server, distinct_id, opts)[key] do
+        nil ->
+          only_local = Keyword.get(opts, :only_evaluate_locally, cfg.only_local)
+          if only_local or cfg.disabled, do: nil, else: RemoteFlags.fetch(cfg, key, distinct_id, opts)
+
+        r ->
+          if Keyword.get(opts, :send_exposure, true), do: GenServer.cast(server, {:expose, key, distinct_id, r.value})
+          Map.merge(r, %{key: key, request_id: nil, locally_evaluated: true})
+      end
+
+    cond do
+      details -> details
+      Map.has_key?(cfg.fallbacks, key) -> fallback(key, cfg.fallbacks[key])
+      true -> nil
+    end
+  end
+
+  defp fallback(key, value),
+    do: %{key: key, value: value, payload: nil, variant: nil, reason: "fallback", condition_index: -1, request_id: nil, locally_evaluated: false}
 
   @doc "Payload of a remote-config flag, decrypted when stored encrypted. Needs `:secret_key`; `nil` when unknown or on failure."
   def get_remote_config_payload(server, key) do
     cfg = GenServer.call(server, :config)
     unless cfg.secret, do: raise(ArgumentError, "get_remote_config_payload requires :secret_key")
     if cfg.disabled, do: nil, else: RemoteFlags.remote_config(cfg, key)
-  end
-
-  defp local_flag(server, key, distinct_id, opts) do
-    case local_results(server, distinct_id, opts)[key] do
-      nil ->
-        :undecided
-
-      r ->
-        if Keyword.get(opts, :send_exposure, true), do: GenServer.cast(server, {:expose, key, distinct_id, r.value})
-        r.value
-    end
   end
 
   @doc """
@@ -185,6 +197,7 @@ defmodule Lucida.Client do
       max: opts[:max_queue_size] || 1_000,
       poll: opts[:flag_poll_ms] || 60_000,
       only_local: Keyword.get(opts, :only_evaluate_locally, true),
+      fallbacks: Map.new(opts[:fallbacks] || %{}, fn {k, v} -> {to_string(k), v} end),
       identities: %{},
       identity_seq: 0,
       disabled: opts[:disabled] || false,
@@ -250,7 +263,7 @@ defmodule Lucida.Client do
   def handle_call(:dropped, _from, s), do: {:reply, s.dropped, s}
 
   def handle_call(:config, _from, s),
-    do: {:reply, Map.take(s, [:api_key, :secret, :host, :http, :only_local, :disabled]), s}
+    do: {:reply, Map.take(s, [:api_key, :secret, :host, :http, :only_local, :disabled, :fallbacks]), s}
 
   # Bounded LRU of identify/group calls already sent: key => last-use sequence, oldest evicted past 1000.
   def handle_call({:first_identity, key}, _from, s) do
