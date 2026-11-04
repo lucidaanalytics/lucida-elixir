@@ -202,7 +202,8 @@ defmodule Lucida.Client do
       identity_seq: 0,
       disabled: opts[:disabled] || false,
       http: opts[:http] || Lucida.Http.Httpc,
-      queue: [],
+      queue: :queue.new(),
+      qlen: 0,
       failures: 0,
       dropped: 0,
       defs: nil,
@@ -226,12 +227,11 @@ defmodule Lucida.Client do
   def handle_cast({:enqueue, _}, %{disabled: true} = s), do: {:noreply, s}
 
   def handle_cast({:enqueue, e}, s) do
-    # shortcut: list append is O(n), n <= max_queue_size; use :queue if profiling says so.
-    {queue, dropped} =
-      if length(s.queue) >= s.max, do: {tl(s.queue), s.dropped + 1}, else: {s.queue, s.dropped}
+    {queue, qlen, dropped} =
+      if s.qlen >= s.max, do: {:queue.drop(s.queue), s.qlen - 1, s.dropped + 1}, else: {s.queue, s.qlen, s.dropped}
 
-    s = %{s | queue: queue ++ [e], dropped: dropped}
-    if length(s.queue) >= s.flush_at, do: {:noreply, elem(drain(s), 1)}, else: {:noreply, s}
+    s = %{s | queue: :queue.in(e, queue), qlen: qlen + 1, dropped: dropped}
+    if s.qlen >= s.flush_at, do: {:noreply, elem(drain(s), 1)}, else: {:noreply, s}
   end
 
   def handle_cast({:expose, key, distinct_id, value}, s) do
@@ -312,15 +312,17 @@ defmodule Lucida.Client do
 
   # -- delivery -------------------------------------------------------------------------------
 
-  defp drain(%{queue: []} = s), do: {:ok, s}
+  defp drain(%{qlen: 0} = s), do: {:ok, s}
 
   defp drain(s) do
-    {batch, rest} = Enum.split(s.queue, s.flush_at)
+    n = min(s.flush_at, s.qlen)
+    {taken, rest} = :queue.split(n, s.queue)
+    batch = :queue.to_list(taken)
     payload = %{"api_key" => s.api_key, "batch" => batch, "sent_at" => Event.iso(nil)}
 
     case post(s, payload) do
-      {:ok, st} when st in 200..299 -> drain(%{s | queue: rest, failures: 0})
-      {:ok, st} when st in 400..499 and st not in [408, 429] -> drain(%{s | queue: rest, dropped: s.dropped + length(batch), failures: 0})
+      {:ok, st} when st in 200..299 -> drain(%{s | queue: rest, qlen: s.qlen - n, failures: 0})
+      {:ok, st} when st in 400..499 and st not in [408, 429] -> drain(%{s | queue: rest, qlen: s.qlen - n, dropped: s.dropped + n, failures: 0})
       _ -> {:error, %{s | failures: s.failures + 1}}
     end
   end
