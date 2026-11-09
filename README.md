@@ -3,8 +3,20 @@
 Server SDK for Lucida. No hex dependencies: OTP `:httpc` for HTTP and the built-in `JSON` module, so it needs
 Elixir >= 1.18 (OTP 25+).
 
+## Install
+
+From GitHub, [lucidaanalytics/lucida-elixir](https://github.com/lucidaanalytics/lucida-elixir), release `v0.1.0`:
+
 ```elixir
-children = [{Lucida.Client, name: MyApp.Lucida, api_key: "lc_pk_...", secret_key: "lc_sk_...", host: "https://app.lucida.dev"}]
+# mix.exs, in deps
+{:lucida, github: "lucidaanalytics/lucida-elixir", tag: "v0.1.0"}
+```
+
+Then `mix deps.get`. The Hex package `lucida` is coming (`{:lucida, "~> 0.1"}`).
+
+
+```elixir
+children = [{Lucida.Client, name: MyApp.Lucida, api_key: "lc_pk_...", secret_key: "lc_sk_...", host: "https://capture.lucidace.com"}]
 
 Lucida.Client.capture(MyApp.Lucida, "u1", "purchase", %{"total" => 12}, groups: %{"company" => "acme"})
 Lucida.Client.identify(MyApp.Lucida, "u1", %{"plan" => "pro"})

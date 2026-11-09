@@ -6,6 +6,8 @@ permissions: {}
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      HAS_HEX: ${{ secrets.HEX_API_KEY != '' }}
     permissions:
       contents: write
       id-token: write
@@ -24,7 +26,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" lucida.tar --generate-notes --verify-tag
-      # Hex has no OIDC publishing yet: HEX_API_KEY is a repository secret.
-      - run: mix hex.publish --yes
+      # Hex has no OIDC publishing: the publish runs only when the HEX_API_KEY repository secret is set.
+      - name: Publish to Hex
+        if: env.HAS_HEX == 'true'
+        run: mix hex.publish --yes
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

@@ -190,7 +190,7 @@ defmodule Lucida.Client do
 
     s = %{
       api_key: Keyword.fetch!(opts, :api_key),
-      host: String.trim_trailing(opts[:host] || "https://app.lucida.dev", "/"),
+      host: String.trim_trailing(opts[:host] || "https://capture.lucidace.com", "/"),
       secret: opts[:secret_key],
       flush_at: opts[:flush_at] || 20,
       interval: opts[:flush_interval_ms] || 5_000,
