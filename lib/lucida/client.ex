@@ -54,8 +54,8 @@ defmodule Lucida.Client do
 
   @doc "An identical call (same id and properties) already sent by this client is skipped."
   def identify(server, distinct_id, properties \\ nil, properties_set_once \\ nil),
-    do: deduped(server, {:identify, distinct_id, properties, properties_set_once}, fn ->
-      capture(server, distinct_id, "$identify", %{}, set: properties, set_once: properties_set_once)
+    do: deduped(server, {:identify, distinct_id, properties, properties_set_once}, fn uuid ->
+      capture(server, distinct_id, "$identify", %{}, uuid: uuid, set: properties, set_once: properties_set_once)
     end)
 
   @doc "`$set` event updating person properties."
@@ -71,14 +71,17 @@ defmodule Lucida.Client do
 
   def group_identify(server, group_type, group_key, properties \\ nil, distinct_id \\ nil) do
     props = %{"$group_type" => group_type, "$group_key" => group_key, "$group_set" => properties || %{}}
-    deduped(server, {:group, group_type, group_key, distinct_id, properties}, fn ->
-      capture(server, distinct_id || "$#{group_type}_#{group_key}", "$groupidentify", props)
+    deduped(server, {:group, group_type, group_key, distinct_id, properties}, fn uuid ->
+      capture(server, distinct_id || "$#{group_type}_#{group_key}", "$groupidentify", props, uuid: uuid)
     end)
   end
 
   defp deduped(server, call, fun) do
     key = :crypto.hash(:sha256, :erlang.term_to_binary(call))
-    if GenServer.call(server, {:first_identity, key}), do: fun.(), else: :ok
+    case GenServer.call(server, {:first_identity, key}) do
+      nil -> :ok
+      uuid -> fun.(uuid)
+    end
   end
 
   @doc "Sends everything queued. `:ok`, or `:error` when a batch could not be delivered (kept for retry)."
@@ -199,6 +202,7 @@ defmodule Lucida.Client do
       only_local: Keyword.get(opts, :only_evaluate_locally, true),
       fallbacks: Map.new(opts[:fallbacks] || %{}, fn {k, v} -> {to_string(k), v} end),
       identities: %{},
+      identity_keys: %{},
       identity_seq: 0,
       disabled: opts[:disabled] || false,
       http: opts[:http] || Lucida.Http.Httpc,
@@ -227,8 +231,13 @@ defmodule Lucida.Client do
   def handle_cast({:enqueue, _}, %{disabled: true} = s), do: {:noreply, s}
 
   def handle_cast({:enqueue, e}, s) do
-    {queue, qlen, dropped} =
-      if s.qlen >= s.max, do: {:queue.drop(s.queue), s.qlen - 1, s.dropped + 1}, else: {s.queue, s.qlen, s.dropped}
+    {queue, qlen, dropped, s} =
+      if s.qlen >= s.max do
+        {{:value, oldest}, rest} = :queue.out(s.queue)
+        {rest, s.qlen - 1, s.dropped + 1, release_identities(s, [oldest])}
+      else
+        {s.queue, s.qlen, s.dropped, s}
+      end
 
     s = %{s | queue: :queue.in(e, queue), qlen: qlen + 1, dropped: dropped}
     if s.qlen >= s.flush_at, do: {:noreply, elem(drain(s), 1)}, else: {:noreply, s}
@@ -266,6 +275,7 @@ defmodule Lucida.Client do
     do: {:reply, Map.take(s, [:api_key, :secret, :host, :http, :only_local, :disabled, :fallbacks]), s}
 
   # Bounded LRU of identify/group calls already sent: key => last-use sequence, oldest evicted past 1000.
+  # Replies with the uuid to send a fresh call under (nil when already sent); a dropped batch frees it again.
   def handle_call({:first_identity, key}, _from, s) do
     fresh = not Map.has_key?(s.identities, key)
     seq = s.identity_seq + 1
@@ -279,8 +289,18 @@ defmodule Lucida.Client do
         ids
       end
 
-    {:reply, fresh, %{s | identities: ids, identity_seq: seq}}
+    s = %{s | identities: ids, identity_seq: seq}
+
+    if fresh do
+      uuid = Event.uuid7()
+      keys = Map.put(s.identity_keys, uuid, key)
+      keys = if map_size(keys) > 1_000, do: Map.delete(keys, keys |> Map.keys() |> hd()), else: keys
+      {:reply, uuid, %{s | identity_keys: keys}}
+    else
+      {:reply, nil, s}
+    end
   end
+
   def handle_call(:defs, _from, %{disabled: true} = s), do: {:reply, nil, s}
   def handle_call(:defs, _from, s), do: {:reply, s.defs, s}
   def handle_call(:eval_state, _from, %{disabled: true} = s), do: {:reply, {nil, []}, s}
@@ -322,9 +342,22 @@ defmodule Lucida.Client do
 
     case post(s, payload) do
       {:ok, st} when st in 200..299 -> drain(%{s | queue: rest, qlen: s.qlen - n, failures: 0})
-      {:ok, st} when st in 400..499 and st not in [408, 429] -> drain(%{s | queue: rest, qlen: s.qlen - n, dropped: s.dropped + n, failures: 0})
+      {:ok, st} when st in 400..499 and st not in [408, 429] ->
+        s = release_identities(s, batch)
+        drain(%{s | queue: rest, qlen: s.qlen - n, dropped: s.dropped + n, failures: 0})
+
       _ -> {:error, %{s | failures: s.failures + 1}}
     end
+  end
+
+  # Forget the identify/group calls whose events were dropped, so repeating them is sent again.
+  defp release_identities(s, events) do
+    Enum.reduce(events, s, fn e, acc ->
+      case Map.pop(acc.identity_keys, e["uuid"]) do
+        {nil, _} -> acc
+        {key, keys} -> %{acc | identity_keys: keys, identities: Map.delete(acc.identities, key)}
+      end
+    end)
   end
 
   # Exponential backoff with jitter: 50%..100% of min(30s, 1s * 2^n).

@@ -147,4 +147,17 @@ defmodule Lucida.ClientTest do
     lc = client(only_evaluate_locally: false, fallbacks: %{"x" => "down"})
     assert Client.get_feature_flag_details(lc, "x", "u").reason == "fallback"
   end
+
+  test "identify and group_identify are resent after their batch was dropped" do
+    FakeHttp.respond([FakeHttp.status(400)])
+    lc = client()
+
+    for _ <- 1..2 do
+      Client.identify(lc, "u", %{"a" => 1})
+      Client.group_identify(lc, "org", "acme", %{"n" => 1})
+      Client.flush(lc)
+    end
+
+    assert Enum.map(FakeHttp.events(), & &1["event"]) == ["$identify", "$groupidentify", "$identify", "$groupidentify"]
+  end
 end

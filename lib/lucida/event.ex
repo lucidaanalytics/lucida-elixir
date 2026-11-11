@@ -1,7 +1,7 @@
 defmodule Lucida.Event do
   @moduledoc "Builds wire events (uuid v7 per event so the server can dedupe retries)."
 
-  @version "0.1.0"
+  @version "0.1.1"
   @lib "lucida-elixir"
 
   def version, do: @version
